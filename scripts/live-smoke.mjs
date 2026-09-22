@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
-export const capabilities = { records: true, recordList: true, optimisticRevision: true, atomicReplace: true, trash: true, trashRestore: true, pagination: false, batchTransactions: false, trashGc: false, auditLog: false, diagnosticExport: false };
+export const capabilities = { records: true, recordList: true, optimisticRevision: true, atomicReplace: true, trash: true, trashRestore: true, permanentDelete: true, pagination: false, batchTransactions: false, trashGc: false, auditLog: false, diagnosticExport: false };
 const assertValue = (condition, message) => { if (!condition) throw new Error(message); };
 const equalJson = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
