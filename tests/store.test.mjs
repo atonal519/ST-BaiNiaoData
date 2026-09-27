@@ -7,6 +7,14 @@ import { RecordStore } from '../src/store.mjs';
 const roots = []; const fresh = async () => { const root = await mkdtemp(join(tmpdir(), 'bainiao-store-')); roots.push(root); return root; };
 test.afterEach(async () => { while (roots.length) await rm(roots.pop(), { recursive: true, force: true }); });
 test('CRUD, isolation, optimistic conflict, trash and restore', async () => { const a = await fresh(); const b = await fresh(); const s = new RecordStore(); const created = await s.put(a, 'n', 'c', 'r', { owner: 'A' }, 0); assert.equal(created.revision, 1); const updated = await s.put(a, 'n', 'c', 'r', { owner: 'A2' }, 1); assert.equal(updated.revision, 2); await assert.rejects(s.put(a, 'n', 'c', 'r', { owner: 'bad' }, 1), e => e.code === 'conflict'); assert.equal((await s.get(a, 'n', 'c', 'r')).data.owner, 'A2'); await assert.rejects(s.get(b, 'n', 'c', 'r'), e => e.code === 'not_found'); const removed = await s.remove(a, 'n', 'c', 'r', 2); assert.equal((await s.listTrash(a, 'n')).length, 1); await assert.rejects(s.get(a, 'n', 'c', 'r'), e => e.code === 'not_found'); const restored = await s.restore(a, 'n', removed.trashId); assert.equal(restored.data.owner, 'A2'); assert.equal((await s.list(a, 'n', 'c'))[0].recordId, 'r'); });
+test('合法 JSON 数据键可完整存取，函数型 toJSON 仍被拒绝', async () => {
+  const root = await fresh(); const s = new RecordStore();
+  const longKey = '界'.repeat(171);
+  const data = JSON.parse(`{"nested":{"toJSON":"普通字段","${longKey}":[1,{"ok":true}]}}`);
+  await s.put(root, 'n', 'c', 'r', data, 0);
+  assert.deepEqual((await s.get(root, 'n', 'c', 'r')).data, data);
+  await assert.rejects(s.put(root, 'n', 'c', 'function-to-json', { toJSON() { return {}; } }, 0), error => error.code === 'validation' && error.message === 'data must be JSON serializable');
+});
 test('permanent remove 校验 revision 后直接删除且不生成 trash', async () => {
   const root = await fresh(); const s = new RecordStore();
   await s.put(root, 'n', 'c', 'r', { value: 1 }, 0);

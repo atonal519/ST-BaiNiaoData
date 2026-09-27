@@ -26,7 +26,7 @@ export function assertSerializable(value) {
       for (let index = 0; index < item.length; index += 1) { if (!Object.prototype.hasOwnProperty.call(item, index)) throw new Error('sparse'); visit(item[index], seen); }
     } else {
       const prototype = Object.getPrototypeOf(item); if (prototype !== Object.prototype && prototype !== null) throw new Error('non-plain');
-      for (const key of Reflect.ownKeys(item)) { if (typeof key !== 'string' || Buffer.byteLength(key, 'utf8') > 512) throw new Error('key'); const descriptor = Object.getOwnPropertyDescriptor(item, key); if (!descriptor?.enumerable || !('value' in descriptor) || key === 'toJSON') throw new Error('descriptor'); visit(descriptor.value, seen); }
+      for (const key of Reflect.ownKeys(item)) { if (typeof key !== 'string') throw new Error('key'); const descriptor = Object.getOwnPropertyDescriptor(item, key); if (!descriptor?.enumerable || !('value' in descriptor)) throw new Error('descriptor'); visit(descriptor.value, seen); }
     }
     seen.delete(item);
   };
