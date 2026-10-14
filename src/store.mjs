@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { BackendError, assertSerializable, expectedRevision, validateKeys, validateSegment } from './validation.mjs';
 import { API_CURRENT, API_SUPPORTED, PLUGIN_ID, PLUGIN_NAME, VERSION } from './config.mjs';
 
-const ROOT_DIR = join('.st-bainiaodata', 'storage-v1'); const RECORDS_DIR = 'records'; const TRASH_DIR = 'system-trash'; const RESERVED_NAMESPACE = TRASH_DIR; const LIST_READ_CONCURRENCY = 32; const locks = new Map();
+const ROOT_DIR = join('.st-bainiaodata', 'storage-v1'); const RECORDS_DIR = 'records'; const TRASH_DIR = 'system-trash'; const RESERVED_NAMESPACE = TRASH_DIR; const LIST_READ_CONCURRENCY = 32; const BATCH_READ_CONCURRENCY = 16; const BATCH_READ_LIMIT = 64; const locks = new Map();
 const now = () => new Date().toISOString();
 const queue = (key, action) => { const previous = locks.get(key) ?? Promise.resolve(); const current = previous.catch(() => {}).then(action); const settled = current.then(() => { if (locks.get(key) === settled) locks.delete(key); }, () => { if (locks.get(key) === settled) locks.delete(key); }); locks.set(key, settled); return current; };
 const userRoot = (root) => { if (typeof root !== 'string' || root.length === 0) throw new BackendError('validation', 'user data root is required'); return root; };
@@ -22,8 +22,37 @@ function validateTrashItem(item, expected, containerNamespace, fileTrashId) { if
 export class RecordStore {
   constructor({ remove = rm, rename: renameFile = rename } = {}) { this.removeFile = remove; this.renameFile = renameFile; }
   async readListEnvelope(file) { return readEnvelope(file); }
-  async health(root) { try { await stat(userRoot(root)); } catch { throw new BackendError('validation', 'user data root is unavailable'); } return { ok: true, plugin: { id: PLUGIN_ID, name: PLUGIN_NAME, version: VERSION }, api: { current: API_CURRENT, supported: API_SUPPORTED }, storage: { scope: 'user-root', path: 'hidden', envelopeSchemaVersion: 1 }, capabilities: { records: true, recordList: true, optimisticRevision: true, atomicReplace: true, trash: true, trashRestore: true, permanentDelete: true, pagination: false, batchTransactions: false, trashGc: false, auditLog: false, diagnosticExport: false } }; }
+  async health(root) { try { await stat(userRoot(root)); } catch { throw new BackendError('validation', 'user data root is unavailable'); } return { ok: true, plugin: { id: PLUGIN_ID, name: PLUGIN_NAME, version: VERSION }, api: { current: API_CURRENT, supported: API_SUPPORTED }, storage: { scope: 'user-root', path: 'hidden', envelopeSchemaVersion: 1 }, capabilities: { records: true, recordList: true, recordBatchRead: true, recordIdList: true, optimisticRevision: true, atomicReplace: true, trash: true, trashRestore: true, permanentDelete: true, pagination: false, batchTransactions: false, trashGc: false, auditLog: false, diagnosticExport: false } }; }
   async get(root, namespace, collection, recordId) { return readEnvelope(paths(root, namespace, collection, recordId).file); }
+  async getMany(root, namespace, collection, recordIds) {
+    const safeRoot = userRoot(root);
+    const safeNamespace = validateSegment(namespace, 'namespace'); const safeCollection = validateSegment(collection, 'collection');
+    if (safeNamespace === RESERVED_NAMESPACE) throw new BackendError('validation', 'namespace is reserved');
+    if (!Array.isArray(recordIds) || recordIds.length < 1 || recordIds.length > BATCH_READ_LIMIT) throw new BackendError('validation', 'recordIds must contain between 1 and 64 record IDs');
+    const ids = recordIds.map((recordId) => validateSegment(recordId, 'record_id'));
+    const results = new Array(ids.length); let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        const index = cursor++; if (index >= ids.length) return;
+        const recordId = ids[index];
+        try { results[index] = { recordId, status: 200, envelope: await this.get(safeRoot, safeNamespace, safeCollection, recordId) }; }
+        catch (error) {
+          const status = error?.code === 'not_found' ? 404 : 500;
+          const message = status === 404 ? 'Record not found' : error?.code === 'storage_error' ? error.message : 'Unable to read record';
+          results[index] = { recordId, status, error: status === 404 ? 'not_found' : 'storage_error', message };
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(BATCH_READ_CONCURRENCY, ids.length) }, () => worker()));
+    return results;
+  }
+  async listRecordIds(root, namespace, collection) {
+    const safeNamespace = validateSegment(namespace, 'namespace'); const safeCollection = validateSegment(collection, 'collection');
+    if (safeNamespace === RESERVED_NAMESPACE) throw new BackendError('validation', 'namespace is reserved');
+    const dir = join(userRoot(root), ROOT_DIR, RECORDS_DIR, safeNamespace, safeCollection); let entries = [];
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch (error) { if (error.code !== 'ENOENT') throw new BackendError('storage_error', 'Unable to list records'); }
+    return entries.filter((item) => item.isFile() && item.name.endsWith('.json')).sort((a, b) => a.name.localeCompare(b.name)).map((entry) => entry.name.slice(0, -5));
+  }
   async put(root, namespace, collection, recordId, data, revision) { const p = paths(root, namespace, collection, recordId); let serialized; try { serialized = assertSerializable(data); } catch (error) { throw error; } const expected = expectedRevision(revision); return queue(`${userRoot(root)}:${p.namespace}/${p.collection}/${p.recordId}`, async () => { let current; try { current = await readEnvelope(p.file); } catch (error) { if (error.code !== 'not_found') throw error; } const actual = current?.revision ?? 0; if (actual !== expected) throw new BackendError('conflict', 'Revision conflict', { currentRevision: actual }); const timestamp = now(); const generationId = current?.generationId ? validateSegment(current.generationId, 'generationId') : randomUUID(); const envelope = { schemaVersion: 1, revision: actual + 1, generationId, createdAt: current?.createdAt ?? timestamp, updatedAt: timestamp, data: JSON.parse(serialized) }; await atomicWrite(p.file, envelope, this.renameFile); return envelope; }); }
   async list(root, namespace, collection) { const safeNamespace = validateSegment(namespace, 'namespace'); const safeCollection = validateSegment(collection, 'collection'); if (safeNamespace === RESERVED_NAMESPACE) throw new BackendError('validation', 'namespace is reserved'); const dir = join(userRoot(root), ROOT_DIR, RECORDS_DIR, safeNamespace, safeCollection); let entries = []; try { entries = await readdir(dir, { withFileTypes: true }); } catch (error) { if (error.code !== 'ENOENT') throw new BackendError('storage_error', 'Unable to list records'); } const files = entries.filter((item) => item.isFile() && item.name.endsWith('.json')).sort((a, b) => a.name.localeCompare(b.name)); const records = new Array(files.length); let cursor = 0, firstError = null; const worker = async () => { while (!firstError) { const index = cursor; if (index >= files.length) return; cursor += 1; const entry = files[index]; try { records[index] = { recordId: entry.name.slice(0, -5), ...(await this.readListEnvelope(join(dir, entry.name))) }; } catch (error) { firstError ??= error; } } }; await Promise.all(Array.from({ length: Math.min(LIST_READ_CONCURRENCY, files.length) }, () => worker())); if (firstError) throw firstError; return records; }
   async remove(root, namespace, collection, recordId, revision) { const p = paths(root, namespace, collection, recordId); const expected = expectedRevision(revision); return queue(`${userRoot(root)}:${p.namespace}/${p.collection}/${p.recordId}`, async () => { const current = await readEnvelope(p.file); if (current.revision !== expected) throw new BackendError('conflict', 'Revision conflict', { currentRevision: current.revision }); const generationId = current.generationId ? validateSegment(current.generationId, 'generationId') : randomUUID(); const deletionEnvelope = current.generationId ? current : { ...current, generationId }; const trashId = `${generationId}-${current.revision}`; const trashFile = join(userRoot(root), ROOT_DIR, TRASH_DIR, p.namespace, `${trashId}.json`); let trash; let created = false; try { trash = await readEnvelope(trashFile); } catch (error) { if (error.code !== 'not_found') throw error; } if (!trash) { trash = { trashId, namespace: p.namespace, collection: p.collection, recordId: p.recordId, generationId, revision: current.revision, originalPath: `${p.namespace}/${p.collection}/${p.recordId}.json`, deletedAt: now(), deletedRevision: current.revision, expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(), envelope: deletionEnvelope }; created = true; } if (created) await atomicWrite(trashFile, trash, this.renameFile); else validateTrashItem(trash, { ...p, generationId, envelope: deletionEnvelope, revision: current.revision }); await this.removeFile(p.file).catch((error) => { if (error.code !== 'ENOENT') throw new BackendError('storage_error', 'Unable to remove record'); }); return { trashId, deletedAt: trash.deletedAt, deletedRevision: current.revision }; }); }

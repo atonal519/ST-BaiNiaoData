@@ -26,6 +26,33 @@ test('permanent remove 校验 revision 后直接删除且不生成 trash', async
   assert.deepEqual(await s.listTrash(root, 'n'), []);
 });
 test('namespace and collection isolation', async () => { const root = await fresh(); const s = new RecordStore(); await s.put(root, 'n1', 'c', 'r', { value: 1 }, 0); await s.put(root, 'n1', 'other', 'r', { value: 2 }, 0); await s.put(root, 'n2', 'c', 'r', { value: 3 }, 0); assert.equal((await s.get(root, 'n1', 'c', 'r')).data.value, 1); assert.equal((await s.get(root, 'n1', 'other', 'r')).data.value, 2); assert.equal((await s.get(root, 'n2', 'c', 'r')).data.value, 3); assert.equal((await s.list(root, 'n1', 'c')).length, 1); });
+test('bounded batch reads preserve input order and isolate missing or malformed records', async () => {
+  const root = await fresh(); const s = new RecordStore();
+  await s.put(root, 'n', 'c', 'a', { value: 'A' }, 0); await s.put(root, 'n', 'c', 'c', { value: 'C' }, 0);
+  const dir = join(root, '.st-bainiaodata', 'storage-v1', 'records', 'n', 'c'); await writeFile(join(dir, 'broken.json'), '{');
+  assert.deepEqual((await s.getMany(root, 'n', 'c', ['c', 'missing', 'broken', 'a'])).map(item => [item.recordId, item.status]), [['c', 200], ['missing', 404], ['broken', 500], ['a', 200]]);
+  assert.deepEqual((await s.getMany(root, 'n', 'c', ['c', 'a'])).map(item => item.envelope.data.value), ['C', 'A']);
+});
+test('batch reads validate every input before any record read and cap concurrency at 16', async () => {
+  const root = await fresh(); let active = 0, peak = 0, reads = 0;
+  class ObservedStore extends RecordStore { async get(...args) { reads += 1; active += 1; peak = Math.max(peak, active); await new Promise(resolve => setImmediate(resolve)); active -= 1; return super.get(...args); } }
+  const observed = new ObservedStore(); const ids = Array.from({ length: 64 }, (_, i) => `r${i}`);
+  await Promise.all(ids.map(id => observed.put(root, 'n', 'c', id, { id }, 0)));
+  await assert.rejects(observed.getMany(root, 'n', 'c', [...ids.slice(0, 63), '../bad']), error => error.code === 'validation');
+  assert.equal(reads, 0);
+  const result = await observed.getMany(root, 'n', 'c', ids); assert.equal(result.length, 64); assert.ok(peak <= 16); assert.ok(peak > 1);
+});
+test('record ID listing sorts names without reading record envelopes', async () => {
+  const root = await fresh(); const dir = join(root, '.st-bainiaodata', 'storage-v1', 'records', 'n', 'c'); await mkdir(dir, { recursive: true });
+  await Promise.all(['z.json', 'a.json', 'ignore.txt'].map(name => writeFile(join(dir, name), '{')));
+  class ObservedStore extends RecordStore { async readListEnvelope() { throw new Error('must not read records'); } }
+  assert.deepEqual(await new ObservedStore().listRecordIds(root, 'n', 'c'), ['a', 'z']);
+});
+test('batch read requires 1..64 valid IDs', async () => {
+  const s = new RecordStore(); const root = await fresh();
+  await assert.rejects(s.getMany(root, 'n', 'c', []), error => error.code === 'validation');
+  await assert.rejects(s.getMany(root, 'n', 'c', Array.from({ length: 65 }, (_, i) => `r${i}`)), error => error.code === 'validation');
+});
 test('record list 保持文件名顺序并将并发读取限制为32', async () => { const root = await fresh(); const dir = join(root, '.st-bainiaodata', 'storage-v1', 'records', 'n', 'c'); await mkdir(dir, { recursive: true }); const names = Array.from({ length: 65 }, (_, index) => `record-${String(index).padStart(3, '0')}`); await Promise.all(names.map(name => writeFile(join(dir, `${name}.json`), '{}'))); class ObservedStore extends RecordStore { active = 0; peak = 0; async readListEnvelope(file) { this.active += 1; this.peak = Math.max(this.peak, this.active); await new Promise(resolve => setImmediate(resolve)); this.active -= 1; return { schemaVersion: 1, revision: 1, data: { file } }; } } const s = new ObservedStore(); const listed = await s.list(root, 'n', 'c'); assert.deepEqual(listed.map(item => item.recordId), names); assert.equal(s.peak, 32); });
 test('record list 任一文件读取失败仍按原 storage_error 语义整体失败', async () => { const root = await fresh(); const dir = join(root, '.st-bainiaodata', 'storage-v1', 'records', 'n', 'c'); await mkdir(dir, { recursive: true }); await writeFile(join(dir, 'a.json'), JSON.stringify({ revision: 1, data: {} })); await writeFile(join(dir, 'b.json'), '{'); await assert.rejects(new RecordStore().list(root, 'n', 'c'), error => error.code === 'storage_error' && error.message === 'Stored record is invalid JSON'); });
 test('formal root is used and pre-existing temporary prototype root is untouched', async () => { const root = await fresh(); const oldFile = join(root, '.temporary-plugin-backend-prototype', 'sentinel.json'); await mkdir(join(root, '.temporary-plugin-backend-prototype'), { recursive: true }); await writeFile(oldFile, '{"legacy":true}\n'); const s = new RecordStore(); await s.put(root, 'n', 'c', 'r', {}, 0); assert.deepEqual(await readdir(join(root, '.st-bainiaodata', 'storage-v1', 'records', 'n', 'c')), ['r.json']); assert.equal(await readFile(oldFile, 'utf8'), '{"legacy":true}\n'); });
