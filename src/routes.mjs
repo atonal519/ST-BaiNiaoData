@@ -19,6 +19,10 @@ export function registerRoutes(router, store = new RecordStore()) {
   router.get('/v1/records/:namespace/:collection', wrap((req) => store.list(rootOf(req), req.params.namespace, req.params.collection)));
   router.get('/v1/record-ids/:namespace/:collection', wrap((req) => store.listRecordIds(rootOf(req), req.params.namespace, req.params.collection)));
   router.post('/v1/record-batch/:namespace/:collection', wrap((req) => store.getMany(rootOf(req), req.params.namespace, req.params.collection, req.body?.recordIds)));
+  router.put('/v1/record-batch/:namespace/:collection', wrap((req) => {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length !== 1 || !Object.hasOwn(req.body, 'records')) throw new BackendError('validation', 'Batch body must contain records');
+    return store.putMany(rootOf(req), req.params.namespace, req.params.collection, req.body.records);
+  }));
   router.delete('/v1/records/:namespace/:collection/:recordId', wrap((req) => store.remove(rootOf(req), req.params.namespace, req.params.collection, req.params.recordId, expectedRevision(req.body?.expectedRevision))));
   router.delete('/v1/records/:namespace/:collection/:recordId/permanent', wrap((req) => store.removePermanent(rootOf(req), req.params.namespace, req.params.collection, req.params.recordId, expectedRevision(req.body?.expectedRevision))));
   router.get('/v1/trash/:namespace', wrap((req) => store.listTrash(rootOf(req), req.params.namespace)));

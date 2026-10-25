@@ -22,8 +22,37 @@ function validateTrashItem(item, expected, containerNamespace, fileTrashId) { if
 export class RecordStore {
   constructor({ remove = rm, rename: renameFile = rename } = {}) { this.removeFile = remove; this.renameFile = renameFile; }
   async readListEnvelope(file) { return readEnvelope(file); }
-  async health(root) { try { await stat(userRoot(root)); } catch { throw new BackendError('validation', 'user data root is unavailable'); } return { ok: true, plugin: { id: PLUGIN_ID, name: PLUGIN_NAME, version: VERSION }, api: { current: API_CURRENT, supported: API_SUPPORTED }, storage: { scope: 'user-root', path: 'hidden', envelopeSchemaVersion: 1 }, capabilities: { records: true, recordList: true, recordBatchRead: true, recordIdList: true, optimisticRevision: true, atomicReplace: true, trash: true, trashRestore: true, permanentDelete: true, pagination: false, batchTransactions: false, trashGc: false, auditLog: false, diagnosticExport: false } }; }
+  async health(root) { try { await stat(userRoot(root)); } catch { throw new BackendError('validation', 'user data root is unavailable'); } return { ok: true, plugin: { id: PLUGIN_ID, name: PLUGIN_NAME, version: VERSION }, api: { current: API_CURRENT, supported: API_SUPPORTED }, storage: { scope: 'user-root', path: 'hidden', envelopeSchemaVersion: 1 }, capabilities: { records: true, recordList: true, recordBatchRead: true, recordBatchWrite: true, recordIdList: true, optimisticRevision: true, atomicReplace: true, trash: true, trashRestore: true, permanentDelete: true, pagination: false, batchTransactions: false, trashGc: false, auditLog: false, diagnosticExport: false } }; }
   async get(root, namespace, collection, recordId) { return readEnvelope(paths(root, namespace, collection, recordId).file); }
+  async putMany(root, namespace, collection, records) {
+    const safeRoot = userRoot(root);
+    if (!Array.isArray(records) || records.length < 1 || records.length > 64) throw new BackendError('validation', 'records must contain between 1 and 64 items');
+    const ids = new Set();
+    for (const item of records) {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || !Object.hasOwn(item, 'data')) throw new BackendError('validation', 'Invalid batch record');
+      paths(safeRoot, namespace, collection, item.recordId);
+      expectedRevision(item.expectedRevision);
+      if (ids.has(item.recordId)) throw new BackendError('validation', 'Duplicate record ID');
+      ids.add(item.recordId);
+    }
+    if (Buffer.byteLength(assertSerializable({ records }), 'utf8') > 1048576) throw new BackendError('validation', 'Batch body exceeds 1048576 bytes');
+    const results = new Array(records.length); let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        const index = cursor++; if (index >= records.length) return;
+        const item = records[index];
+        try { results[index] = { recordId: item.recordId, status: 200, envelope: await this.put(safeRoot, namespace, collection, item.recordId, item.data, item.expectedRevision) }; }
+        catch (error) {
+          const known = error instanceof BackendError;
+          results[index] = { recordId: item.recordId, status: error?.code === 'conflict' ? 409 : error?.code === 'validation' ? 400 : 500,
+            error: known ? error.code : 'storage_error', message: known ? error.message : 'Unable to save record',
+            ...(Number.isSafeInteger(error?.details?.currentRevision) ? { currentRevision: error.details.currentRevision } : {}) };
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, records.length) }, worker));
+    return results;
+  }
   async getMany(root, namespace, collection, recordIds) {
     const safeRoot = userRoot(root);
     const safeNamespace = validateSegment(namespace, 'namespace'); const safeCollection = validateSegment(collection, 'collection');

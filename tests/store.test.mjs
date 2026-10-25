@@ -5,6 +5,43 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RecordStore } from '../src/store.mjs';
 const roots = []; const fresh = async () => { const root = await mkdtemp(join(tmpdir(), 'bainiao-store-')); roots.push(root); return root; };
+test('batch writes preserve ordered CAS results and atomic files with at most four saves', async () => {
+  const root = await fresh(); let active = 0, maxActive = 0;
+  const { rename } = await import('node:fs/promises');
+  const store = new RecordStore({ rename: async (from, to) => {
+    active++; maxActive = Math.max(maxActive, active);
+    try { await new Promise(resolve => setTimeout(resolve, 2)); if (to.endsWith('/broken.json')) throw new Error('fixture failure'); await rename(from, to); }
+    finally { active--; }
+  } });
+  await store.put(root, 'n', 'c', 'existing', { old: true }, 0);
+  const records = Array.from({ length: 64 }, (_, index) => ({ recordId: `r-${index}`, data: { text: `中性材料${index}` }, expectedRevision: 0 }));
+  records[1].recordId = 'existing'; records[2].recordId = 'broken';
+  const saved = await store.putMany(root, 'n', 'c', records);
+  assert.deepEqual(saved.map(item => item.recordId), records.map(item => item.recordId));
+  assert.equal(saved[1].status, 409); assert.equal(saved[1].currentRevision, 1); assert.equal(saved[2].status, 500);
+  for (const [index, item] of saved.entries()) if (![1, 2].includes(index)) {
+    assert.equal(item.status, 200); assert.equal(item.envelope.revision, 1);
+    assert.deepEqual((await store.get(root, 'n', 'c', item.recordId)), item.envelope);
+  }
+  assert.ok(maxActive > 1); assert.ok(maxActive <= 4); assert.equal(active, 0);
+  assert.deepEqual((await store.get(root, 'n', 'c', 'existing')).data, { old: true });
+  assert.equal((await readdir(join(root, '.st-bainiaodata/storage-v1/records/n/c'))).some(name => name.endsWith('.tmp')), false);
+});
+
+test('batch writes validate all keys, revisions, count and canonical UTF8 bytes before saving', async () => {
+  const root = await fresh(), store = new RecordStore();
+  const entry = { recordId: 'valid', data: { text: '正常' }, expectedRevision: 0 };
+  for (const records of [[], Array.from({ length: 65 }, (_, i) => ({ ...entry, recordId: `r-${i}` })), [entry, entry], [entry, { ...entry, recordId: '../bad' }], [entry, { ...entry, recordId: 'bad', expectedRevision: -1 }], [entry, { ...entry, recordId: 'bad', data: undefined }], [entry, { ...entry, recordId: 'big', data: '字'.repeat(350000) }]]) {
+    await assert.rejects(store.putMany(root, 'n', 'c', records), error => error.code === 'validation');
+    assert.deepEqual(await store.listRecordIds(root, 'n', 'c'), []);
+  }
+  const exact = [{ recordId: 'exact', data: '', expectedRevision: 0 }];
+  const overhead = Buffer.byteLength(JSON.stringify({ records: exact })); exact[0].data = 'a'.repeat(1048576 - overhead);
+  assert.equal(Buffer.byteLength(JSON.stringify({ records: exact })), 1048576);
+  assert.equal((await store.putMany(root, 'n', 'c', exact))[0].status, 200);
+  exact[0] = { ...exact[0], recordId: 'over', data: exact[0].data + 'aa' };
+  await assert.rejects(store.putMany(root, 'n', 'c', exact), error => error.code === 'validation');
+});
 test.afterEach(async () => { while (roots.length) await rm(roots.pop(), { recursive: true, force: true }); });
 test('CRUD, isolation, optimistic conflict, trash and restore', async () => { const a = await fresh(); const b = await fresh(); const s = new RecordStore(); const created = await s.put(a, 'n', 'c', 'r', { owner: 'A' }, 0); assert.equal(created.revision, 1); const updated = await s.put(a, 'n', 'c', 'r', { owner: 'A2' }, 1); assert.equal(updated.revision, 2); await assert.rejects(s.put(a, 'n', 'c', 'r', { owner: 'bad' }, 1), e => e.code === 'conflict'); assert.equal((await s.get(a, 'n', 'c', 'r')).data.owner, 'A2'); await assert.rejects(s.get(b, 'n', 'c', 'r'), e => e.code === 'not_found'); const removed = await s.remove(a, 'n', 'c', 'r', 2); assert.equal((await s.listTrash(a, 'n')).length, 1); await assert.rejects(s.get(a, 'n', 'c', 'r'), e => e.code === 'not_found'); const restored = await s.restore(a, 'n', removed.trashId); assert.equal(restored.data.owner, 'A2'); assert.equal((await s.list(a, 'n', 'c'))[0].recordId, 'r'); });
 test('合法 JSON 数据键可完整存取，函数型 toJSON 仍被拒绝', async () => {

@@ -2,6 +2,8 @@
 
 `ST-BaiNiaoData` 是 SillyTavern 服务端插件仓库，插件 ID 为 `st-bainiaodata`，显示名为 `Bainiao Data`，中文名为“白鳥数据后端”。它是一个无 UI、零第三方运行时依赖的 V1 数据后端：数据保存在用户自己的 SillyTavern 服务器上，不上传到作者服务器。
 
+当前版本 **0.1.2**，新增批量保存接口；更新后重启酒馆加载。
+
 ## 前置配置
 
 在酒馆根目录的 `config.yaml` 中确认服务端插件已启用：
@@ -102,3 +104,7 @@ node scripts/live-smoke.mjs http://127.0.0.1:8000
 ## API 与版本
 
 宿主基址为 `/api/plugins/st-bainiaodata`，内部路由统一使用 `/v1`。当前 API 版本为 `1`，程序版本见插件 manifest；升级时应保持 V1 合同并先备份用户数据。
+
+### 有界批量保存
+
+`PUT /v1/record-batch/:namespace/:collection` 接受 `{records:[{recordId,data,expectedRevision}]}`。每批最多64条，完整规范JSON请求体UTF8最多1MiB；全部参数、重复ID和体积在写入前校验。后端最多4条并发，沿每条记录原有CAS和原子文件替换，按输入顺序返回成功envelope或逐项错误；成功项保留。health的`recordBatchWrite`标识此能力，超大单条仍使用原单记录PUT。
