@@ -2,7 +2,7 @@
 
 `ST-BaiNiaoData` 是 SillyTavern 服务端插件仓库，插件 ID 为 `st-bainiaodata`，显示名为 `Bainiao Data`，中文名为“白鳥数据后端”。它是一个无 UI、零第三方运行时依赖的 V1 数据后端：数据保存在用户自己的 SillyTavern 服务器上，不上传到作者服务器。
 
-当前版本 **0.1.2**，新增批量保存接口；更新后重启酒馆加载。
+当前版本 **0.2.0**，新增回收站到期清理，以及管理员查看和更新服务端插件的接口；保留 V1 记录、批量读写和恢复合同。更新后重启酒馆加载。
 
 ## 前置配置
 
@@ -62,7 +62,7 @@ git pull --ff-only
 
 浏览器直接访问可能受到登录或 CSRF 保护影响；插件前端应通过宿主会话发起请求。
 
-当前 Luker `release` 已真实加载并完成完整 smoke 验证。官方原生安装方式目前仅依据当前参考源码确认 loader 合同，尚未进行独立的真实运行 smoke，不应据此推断其运行验证已经完成。
+更新并重启后，健康检查中的 `plugin.version` 应为 `0.2.0`，`capabilities.trashGc` 和 `capabilities.serverPluginManagement` 应为 `true`。开发验证可运行 `npm test` 与 `npm run check`；测试使用临时目录、模拟宿主和本地 Git 仓库。
 
 ## 存储与能力
 
@@ -75,9 +75,9 @@ git pull --ff-only
 
 每个用户使用自己的 SillyTavern 用户根目录，用户之间相互隔离；`namespace` 只提供逻辑隔离，不是安全权限边界。
 
-已支持：记录创建、读取、更新、删除与列表；版本 0.1.1 提供可选的记录 ID 清单和最多 64 条的批量读取；revision 乐观并发；单文件临时写入后原子替换；回收站与恢复；用于清理旧版本的独立永久删除入口（不进入回收站）。批量读取只减少往返次数，不提供批量写入事务。新前端仍兼容旧后端；启用批量读取需更新到 0.1.1。
+已支持：记录创建、读取、更新、删除与列表；版本 0.1.1 提供可选的记录 ID 清单和最多 64 条的批量读取；revision 乐观并发；单文件临时写入后原子替换；回收站与恢复；用于清理旧版本的独立永久删除入口（不进入回收站）。新增 `POST /v1/trash/:namespace/collect-expired` 按 `expiresAt` 清理回收站，每次最多检查 32 项并返回计数和续查游标，由客户端按需触发。批量读取只减少往返次数，不提供批量写入事务。旧后端不执行回收站到期清理；需更新到本版本并重启酒馆后生效。
 
-暂不支持：分页、批量事务、自动 GC、审计日志、诊断导出、多进程锁、schema 迁移、构画迁移、千千结业务 schema 或任何 UI。
+暂不支持：分页、批量事务、后台常驻 GC、审计日志、诊断导出、多进程锁、schema 迁移、构画迁移、千千结业务 schema 或任何 UI。
 
 ## Live smoke
 
@@ -108,3 +108,13 @@ node scripts/live-smoke.mjs http://127.0.0.1:8000
 ### 有界批量保存
 
 `PUT /v1/record-batch/:namespace/:collection` 接受 `{records:[{recordId,data,expectedRevision}]}`。每批最多64条，完整规范JSON请求体UTF8最多1MiB；全部参数、重复ID和体积在写入前校验。后端最多4条并发，沿每条记录原有CAS和原子文件替换，按输入顺序返回成功envelope或逐项错误；成功项保留。health的`recordBatchWrite`标识此能力，超大单条仍使用原单记录PUT。
+
+### 回收站到期清理
+
+`POST /v1/trash/:namespace/collect-expired` 接受 `{limit:32,cursor:null}`，`limit` 为1至32，后续批次传入返回的 `nextCursor`。响应包含 `scanned`、`deleted`、`failed`、`nextCursor` 和 `complete`。仅清理当前用户、指定 namespace 内已到 `expiresAt` 的回收项，保留现用记录和未到期项；每项清理前重新检查归属与到期时间。
+
+### 管理员服务端插件管理
+
+`POST /v1/admin/plugins/list` 返回已安装插件的名称、版本、依赖状况和可更新状态；`POST /v1/admin/plugins/update` 接受 `{directory:"插件目录名"}`，更新指定插件。两接口要求宿主当前账号的 `profile.admin` 为 `true`，普通用户返回403。
+
+列表只读取元数据，不加载插件代码或拉取远端。更新限 `plugins/` 直属的独立 Git 仓库，按该仓已配置的上游执行 `git pull --ff-only`；有本地修改、没有上游或分支分歧时停止并返回原因。更新结果重新读取磁盘版本，代码变化时返回 `restartRecommended:true`，由管理员重启酒馆加载。依赖情况仅作提示；接口不安装依赖，不安装或卸载插件，也不自动重启服务。

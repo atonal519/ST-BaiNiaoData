@@ -1,5 +1,9 @@
 import { registerRoutes } from './src/routes.mjs';
 import { API_CURRENT, API_SUPPORTED, PLUGIN_ID, PLUGIN_NAME, VERSION } from './src/config.mjs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createServerPluginService } from './src/server-plugins.mjs';
+import { registerAdminPluginRoutes } from './src/admin-plugin-routes.mjs';
 
 export const info = {
   id: PLUGIN_ID,
@@ -11,5 +15,8 @@ export const info = {
 
 export const api = { current: API_CURRENT, supported: API_SUPPORTED };
 
-export function init(router) { return registerRoutes(router); }
+export function init(router) {
+  registerRoutes(router);
+  return registerAdminPluginRoutes(router, { service: createServerPluginService({ pluginsPath: dirname(dirname(fileURLToPath(import.meta.url))) }) });
+}
 export function exit() {}

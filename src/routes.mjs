@@ -13,7 +13,10 @@ const wrap = (handler) => async (request, response) => {
 };
 
 export function registerRoutes(router, store = new RecordStore()) {
-  router.get('/v1/health', wrap((req) => store.health(rootOf(req))));
+  router.get('/v1/health', wrap(async (req) => {
+    const health = await store.health(rootOf(req));
+    return { ...health, capabilities: { ...health.capabilities, serverPluginManagement: true } };
+  }));
   router.get('/v1/records/:namespace/:collection/:recordId', wrap((req) => store.get(rootOf(req), req.params.namespace, req.params.collection, req.params.recordId)));
   router.put('/v1/records/:namespace/:collection/:recordId', wrap((req) => store.put(rootOf(req), req.params.namespace, req.params.collection, req.params.recordId, req.body?.data, expectedRevision(req.body?.expectedRevision))));
   router.get('/v1/records/:namespace/:collection', wrap((req) => store.list(rootOf(req), req.params.namespace, req.params.collection)));
@@ -26,6 +29,7 @@ export function registerRoutes(router, store = new RecordStore()) {
   router.delete('/v1/records/:namespace/:collection/:recordId', wrap((req) => store.remove(rootOf(req), req.params.namespace, req.params.collection, req.params.recordId, expectedRevision(req.body?.expectedRevision))));
   router.delete('/v1/records/:namespace/:collection/:recordId/permanent', wrap((req) => store.removePermanent(rootOf(req), req.params.namespace, req.params.collection, req.params.recordId, expectedRevision(req.body?.expectedRevision))));
   router.get('/v1/trash/:namespace', wrap((req) => store.listTrash(rootOf(req), req.params.namespace)));
+  router.post('/v1/trash/:namespace/collect-expired', wrap((req) => store.collectExpiredTrash(rootOf(req), req.params.namespace, req.body)));
   router.post('/v1/trash/:namespace/:trashId/restore', wrap((req) => store.restore(rootOf(req), req.params.namespace, req.params.trashId)));
   return router;
 }

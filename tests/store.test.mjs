@@ -44,6 +44,62 @@ test('batch writes validate all keys, revisions, count and canonical UTF8 bytes 
 });
 test.afterEach(async () => { while (roots.length) await rm(roots.pop(), { recursive: true, force: true }); });
 test('CRUD, isolation, optimistic conflict, trash and restore', async () => { const a = await fresh(); const b = await fresh(); const s = new RecordStore(); const created = await s.put(a, 'n', 'c', 'r', { owner: 'A' }, 0); assert.equal(created.revision, 1); const updated = await s.put(a, 'n', 'c', 'r', { owner: 'A2' }, 1); assert.equal(updated.revision, 2); await assert.rejects(s.put(a, 'n', 'c', 'r', { owner: 'bad' }, 1), e => e.code === 'conflict'); assert.equal((await s.get(a, 'n', 'c', 'r')).data.owner, 'A2'); await assert.rejects(s.get(b, 'n', 'c', 'r'), e => e.code === 'not_found'); const removed = await s.remove(a, 'n', 'c', 'r', 2); assert.equal((await s.listTrash(a, 'n')).length, 1); await assert.rejects(s.get(a, 'n', 'c', 'r'), e => e.code === 'not_found'); const restored = await s.restore(a, 'n', removed.trashId); assert.equal(restored.data.owner, 'A2'); assert.equal((await s.list(a, 'n', 'c'))[0].recordId, 'r'); });
+test('expired trash cleanup is cursor-bounded, validates ownership and preserves current or unexpired records', async () => {
+  const root = await fresh(), store = new RecordStore();
+  const expired = [];
+  for (const id of ['a', 'b', 'same']) {
+    const created = await store.put(root, 'n', 'c', id, { value: 'old' }, 0);
+    expired.push([id, await store.remove(root, 'n', 'c', id, created.revision)]);
+    if (id === 'same') await store.put(root, 'n', 'c', id, { value: 'current' }, 0);
+  }
+  const kept = await store.put(root, 'n', 'c', 'kept', { value: 'unexpired' }, 0);
+  const keptTrash = await store.remove(root, 'n', 'c', 'kept', kept.revision);
+  const foreignRecord = await store.put(root, 'other', 'c', 'foreign', { value: 'foreign' }, 0);
+  const foreignTrash = await store.remove(root, 'other', 'c', 'foreign', foreignRecord.revision);
+  const trashDir = join(root, '.st-bainiaodata', 'storage-v1', 'system-trash');
+  for (const [namespace, trashId, expiry] of [
+    ...expired.map(([_, item]) => ['n', item.trashId, '2026-01-01T00:00:00.000Z']),
+    ['n', keptTrash.trashId, '2099-01-01T00:00:00.000Z'], ['other', foreignTrash.trashId, '2026-01-01T00:00:00.000Z'],
+  ]) {
+    const file = join(trashDir, namespace, `${trashId}.json`);
+    const item = JSON.parse(await readFile(file, 'utf8')); item.expiresAt = expiry; await writeFile(file, JSON.stringify(item));
+  }
+  const first = await store.collectExpiredTrash(root, 'n', { limit: 2 });
+  assert.equal(first.scanned, 2); assert.ok(first.deleted <= 2); assert.equal(first.complete, false); assert.ok(first.nextCursor);
+  const second = await store.collectExpiredTrash(root, 'n', { limit: 2, cursor: first.nextCursor });
+  assert.equal(second.scanned, 2); assert.equal(first.deleted + second.deleted, 3); assert.equal(second.failed, 0); assert.equal(second.complete, true);
+  assert.deepEqual((await store.listTrash(root, 'n')).map(item => item.trashId), [keptTrash.trashId]);
+  assert.equal((await store.get(root, 'n', 'c', 'same')).data.value, 'current');
+  assert.equal((await store.listTrash(root, 'other')).length, 1);
+  await assert.rejects(store.collectExpiredTrash(root, 'n', { limit: 33 }), error => error.code === 'validation');
+});
+test('expired trash cleanup reports an individual delete failure without losing other results', async () => {
+  const root = await fresh(); let failedTrashPath = '';
+  const store = new RecordStore({ remove: async file => {
+    if (file === failedTrashPath) throw new Error('injected trash deletion failure');
+    return rm(file);
+  } });
+  const items = [];
+  for (const id of ['bad-expiry', 'delete-fails', 'deleted']) {
+    const saved = await store.put(root, 'n', 'c', id, { id }, 0);
+    const trash = await store.remove(root, 'n', 'c', id, saved.revision);
+    items.push({ id, trash });
+  }
+  const trashDir = join(root, '.st-bainiaodata', 'storage-v1', 'system-trash', 'n');
+  for (const { id, trash } of items) {
+    const file = join(trashDir, `${trash.trashId}.json`);
+    const item = JSON.parse(await readFile(file, 'utf8'));
+    item.expiresAt = id === 'bad-expiry' ? 'not-a-date' : '2026-01-01T00:00:00.000Z';
+    await writeFile(file, JSON.stringify(item));
+    if (id === 'delete-fails') failedTrashPath = file;
+  }
+  const result = await store.collectExpiredTrash(root, 'n', { limit: 32 });
+  assert.equal(result.scanned, 3);
+  assert.equal(result.deleted, 1);
+  assert.equal(result.failed, 2);
+  assert.equal(result.complete, true);
+  assert.deepEqual(new Set((await store.listTrash(root, 'n')).map(item => item.trashId)), new Set(items.filter(item => item.id !== 'deleted').map(item => item.trash.trashId)));
+});
 test('合法 JSON 数据键可完整存取，函数型 toJSON 仍被拒绝', async () => {
   const root = await fresh(); const s = new RecordStore();
   const longKey = '界'.repeat(171);

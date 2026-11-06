@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { VERSION, PLUGIN_ID, PLUGIN_NAME, API_CURRENT, API_SUPPORTED } from '../src/config.mjs';
 
-export const capabilities = { records: true, recordList: true, optimisticRevision: true, atomicReplace: true, trash: true, trashRestore: true, permanentDelete: true, pagination: false, batchTransactions: false, trashGc: false, auditLog: false, diagnosticExport: false };
+export const capabilities = { records: true, recordList: true, recordBatchRead: true, recordBatchWrite: true, recordIdList: true, optimisticRevision: true, atomicReplace: true, trash: true, trashRestore: true, permanentDelete: true, trashGc: true, pagination: false, batchTransactions: false, auditLog: false, diagnosticExport: false, serverPluginManagement: true };
 const assertValue = (condition, message) => { if (!condition) throw new Error(message); };
 const equalJson = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -10,7 +11,7 @@ const assertEnvelope = (value, expected, message) => { assertValue(isObject(valu
 
 export async function runSmoke({ request, randomId = randomUUID, namespace: suppliedNamespace, recordId: suppliedRecordId, log = console.log }) {
   const namespace = suppliedNamespace ?? `smoke-${randomId()}`; const recordId = suppliedRecordId ?? `record-${randomId()}`;
-  const health = await request('/v1/health'); assertValue(health.status === 200 && health.body.ok === true, 'health 响应不符合预期'); assertValue(equalJson(health.body.plugin, { id: 'st-bainiaodata', name: 'Bainiao Data', version: '0.1.0' }), 'health 插件合同不符合预期'); assertValue(equalJson(health.body.api, { current: 1, supported: [1] }), 'health API 合同不符合预期'); assertValue(equalJson(health.body.storage, { scope: 'user-root', path: 'hidden', envelopeSchemaVersion: 1 }), 'health 存储合同不符合预期'); assertValue(equalJson(health.body.capabilities, capabilities), 'health 能力合同不符合预期');
+  const health = await request('/v1/health'); assertValue(health.status === 200 && health.body.ok === true, 'health 响应不符合预期'); assertValue(equalJson(health.body.plugin, { id: PLUGIN_ID, name: PLUGIN_NAME, version: VERSION }), 'health 插件合同不符合预期'); assertValue(equalJson(health.body.api, { current: API_CURRENT, supported: API_SUPPORTED }), 'health API 合同不符合预期'); assertValue(equalJson(health.body.storage, { scope: 'user-root', path: 'hidden', envelopeSchemaVersion: 1 }), 'health 存储合同不符合预期'); assertValue(equalJson(health.body.capabilities, capabilities), 'health 能力合同不符合预期');
   const path = `/v1/records/${encodeURIComponent(namespace)}/records/${encodeURIComponent(recordId)}`; const createdData = { smoke: true, recordId, phase: 'created' };
   const created = await request(path, { method: 'PUT', body: JSON.stringify({ data: createdData, expectedRevision: 0 }) }); assertValue(created.status === 200, '创建响应不符合预期'); assertEnvelope(created.body, { revision: 1, generationId: created.body?.generationId, data: createdData }, '创建响应不符合预期');
   const firstRead = await request(path); assertValue(firstRead.status === 200, '首读响应不符合预期'); assertEnvelope(firstRead.body, created.body, '首读响应不符合预期');
